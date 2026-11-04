@@ -331,22 +331,256 @@ def get_favorites_by_topic(username: str) -> dict:
         result.setdefault(ex["topic"], []).append(ex)
     return result
 
-
 # =========================================================
 #  ГЕНЕРАЦИЯ УПРАЖНЕНИЙ
 # =========================================================
+
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ТАБЛИЦЫ ----------
+NOTE_TO_INDEX = {
+    "до": 0, "до-диез": 1, "ре": 2, "ре-диез": 3,
+    "ми": 4, "фа": 5, "фа-диез": 6, "соль": 7,
+    "соль-диез": 8, "ля": 9, "ля-диез": 10, "си": 11,
+}
+INDEX_TO_NOTE = {v: k for k, v in NOTE_TO_INDEX.items()}
+
+# Базовые ноты (без знаков)
+BASE_NOTES = ["до", "ре", "ми", "фа", "соль", "ля", "си"]
+BASE_TO_INDEX = {"до": 0, "ре": 2, "ми": 4, "фа": 5, "соль": 7, "ля": 9, "си": 11}
+
+# Полутоны для интервалов
+INTERVAL_SEMITONES = {
+    "ч.1": 0, "м.2": 1, "б.2": 2, "м.3": 3, "б.3": 4,
+    "ч.4": 5, "ув.4": 6, "ум.5": 6, "ч.5": 7,
+    "м.6": 8, "б.6": 9, "м.7": 10, "б.7": 11, "ч.8": 12,
+}
+
+# Ступени (в нотах) для интервалов — сколько базовых нот пройти
+INTERVAL_STEPS = {
+    "ч.1": 1, "м.2": 2, "б.2": 2, "м.3": 3, "б.3": 3,
+    "ч.4": 4, "ув.4": 4, "ум.5": 5, "ч.5": 5,
+    "м.6": 6, "б.6": 6, "м.7": 7, "б.7": 7, "ч.8": 8,
+}
+
+# Состав в тонах/полутонах (текстом)
+INTERVAL_TONES_TEXT = {
+    "ч.1": "0 полутонов",
+    "м.2": "1 полутон",
+    "б.2": "1 тон (2 полутона)",
+    "м.3": "1,5 тона (3 полутона)",
+    "б.3": "2 тона (4 полутона)",
+    "ч.4": "2,5 тона (5 полутонов)",
+    "ув.4": "3 тона (6 полутонов)",
+    "ум.5": "3 тона (6 полутонов)",
+    "ч.5": "3,5 тона (7 полутонов)",
+    "м.6": "4 тона (8 полутонов)",
+    "б.6": "4,5 тона (9 полутонов)",
+    "м.7": "5 тонов (10 полутонов)",
+    "б.7": "5,5 тона (11 полутонов)",
+    "ч.8": "6 тонов (12 полутонов)",
+}
+
+# Скороговорки
+SHARP_ORDER = ["фа", "до", "соль", "ре", "ля", "ми", "си"]
+FLAT_ORDER = ["си", "ми", "ля", "ре", "соль", "до", "фа"]
+
+
+def _base_index(note: str) -> int:
+    """Индекс базовой ноты (до=0, ре=2, ...)."""
+    return BASE_TO_INDEX[note]
+
+
+def _base_from_index(idx: int) -> str:
+    """Обратное: индекс 0-11 -> базовая нота."""
+    idx = idx % 12
+    for base, i in BASE_TO_INDEX.items():
+        if i == idx:
+            return base
+    # Для индексов, которых нет в BASE (например, 1), возвращаем предыдущую базовую
+    # (используем только для отображения через NOTE_TO_INDEX)
+    return INDEX_TO_NOTE.get(idx, "?")
+
+
+def _enumerate_interval_notes(start_note: str, interval: str) -> list:
+    """
+    Возвращает список нот, которые получаются при построении интервала
+    от start_note вверх. Учитывает количество ступеней интервала.
+    """
+    steps = INTERVAL_STEPS[interval]
+    semitones = INTERVAL_SEMITONES[interval]
+    start_idx = _base_index(start_note)
+    # Список базовых нот (только буквы, без знаков)
+    base_sequence = ["до", "ре", "ми", "фа", "соль", "ля", "си"]
+    # Находим, с какой буквы начинаем
+    start_pos = base_sequence.index(start_note)
+    result = []
+    for k in range(steps):
+        base = base_sequence[(start_pos + k) % 7]
+        result.append(base)
+    # Последняя нота должна быть на нужном расстоянии в полутонах
+    # Считаем, сколько полутонов между start_note и последней базовой нотой по чистым нотам
+    # Проще: посчитать разницу индексов между стартом и последней базовой нотой (в хроматической шкале)
+    last_base = result[-1]
+    last_idx = BASE_TO_INDEX[last_base]
+    # Разница без учёта октав
+    diff = (last_idx - start_idx) % 12
+    # Нам нужно, чтобы diff == semitones. Если не равно — добавляем знак.
+    if diff == semitones:
+        return result
+    # Если diff больше — надо понизить последнюю ноту на (diff - semitones)
+    # Если меньше — повысить на (semitones - diff)
+    delta = semitones - diff
+    # delta может быть отрицательным (diff > semitones) или положительным (diff < semitones)
+    # Знаки: +1 = диез, -1 = бемоль, ±2 = дубль
+    if delta == 0:
+        sign = ""
+    elif delta == 1:
+        sign = "-диез"
+    elif delta == -1:
+        sign = "-бемоль"
+    elif delta == 2:
+        sign = "-дубль-диез"
+    elif delta == -2:
+        sign = "-дубль-бемоль"
+    else:
+        # fallback: не должно случаться для базовых интервалов
+        sign = ""
+    result[-1] = last_base + sign
+    return result
+
+
+def _chord_notes_from_sound(note: str, chord_type: str) -> list:
+    """Возвращает список нот для аккорда от ноты вверх."""
+    if chord_type == "мажорное":
+        intervals = ["б.3", "ч.5"]
+    elif chord_type == "минорное":
+        intervals = ["м.3", "ч.5"]
+    elif chord_type == "увеличенное":
+        intervals = ["б.3", "ув.5"]  # б.3+б.3 = ув.5
+    elif chord_type == "уменьшённое":
+        intervals = ["м.3", "ум.5"]  # м.3+м.3 = ум.5
+    elif chord_type == "секстаккорд мажорный":
+        intervals = ["м.3", "ч.4"]  # от терции: м.3 + ч.4
+    elif chord_type == "квартсекстаккорд мажорный":
+        intervals = ["ч.4", "б.3"]
+    elif chord_type == "секстаккорд минорный":
+        intervals = ["б.3", "ч.4"]
+    elif chord_type == "квартсекстаккорд минорный":
+        intervals = ["ч.4", "м.3"]
+    else:
+        # Септаккорды
+        if chord_type == "D7":
+            return [note] + _enumerate_interval_notes(note, "б.3")[1:] + \
+                   [_enumerate_interval_notes(_enumerate_interval_notes(note, "б.3")[-1], "м.3")[-1]] + \
+                   [_enumerate_interval_notes(_enumerate_interval_notes(_enumerate_interval_notes(note, "б.3")[-1], "м.3")[-1], "м.3")[-1]]
+        # Универсальный fallback для септаккордов: используем интервалы от звука
+        return _seventh_chord_notes(note, chord_type)
+    # Строим трезвучие: bass, затем терция, затем квинта
+    b1 = note
+    b2 = _enumerate_interval_notes(note, intervals[0])[-1]
+    b3 = _enumerate_interval_notes(note, intervals[1])[-1]
+    return [b1, b2, b3]
+
+
+def _seventh_chord_notes(note: str, chord_type: str) -> list:
+    """Ноты септаккорда от звука (упрощённо)."""
+    # Строим от ноты: прима, терция, квинта, септима
+    if chord_type == "D7":        # маж. трезвучие + м.7
+        third = _enumerate_interval_notes(note, "б.3")[-1]
+        fifth = _enumerate_interval_notes(note, "ч.5")[-1]
+        seventh = _enumerate_interval_notes(note, "м.7")[-1]
+    elif chord_type == "D65":
+        third = _enumerate_interval_notes(note, "м.3")[-1]
+        fifth = _enumerate_interval_notes(note, "ум.5")[-1]
+        seventh = _enumerate_interval_notes(note, "б.2")[-1]
+    elif chord_type == "D43":
+        third = _enumerate_interval_notes(note, "м.3")[-1]
+        fifth = _enumerate_interval_notes(note, "б.2")[-1]
+        seventh = _enumerate_interval_notes(note, "б.3")[-1]
+    elif chord_type == "D2":
+        third = _enumerate_interval_notes(note, "б.2")[-1]
+        fifth = _enumerate_interval_notes(note, "б.3")[-1]
+        seventh = _enumerate_interval_notes(note, "м.3")[-1]
+    elif chord_type == "II7":     # мин. трезвучие + м.7
+        third = _enumerate_interval_notes(note, "м.3")[-1]
+        fifth = _enumerate_interval_notes(note, "ч.5")[-1]
+        seventh = _enumerate_interval_notes(note, "м.7")[-1]
+    elif chord_type == "VII7":    # ум. трезвучие + м.7
+        third = _enumerate_interval_notes(note, "м.3")[-1]
+        fifth = _enumerate_interval_notes(note, "ум.5")[-1]
+        seventh = _enumerate_interval_notes(note, "м.7")[-1]
+    else:
+        third = fifth = seventh = note
+    return [note, third, fifth, seventh]
+
+
+def _interval_answer_text(start_note: str, interval: str) -> str:
+    """Возвращает подробный ответ для интервала."""
+    notes = _enumerate_interval_notes(start_note, interval)
+    semis = INTERVAL_SEMITONES[interval]
+    tones = INTERVAL_TONES_TEXT[interval]
+    return (
+        f"Интервал: **{interval}** от ноты «{start_note}».\n\n"
+        f"• Ноты: **{' — '.join(notes)}**\n"
+        f"• Всего полутонов: **{semis}**\n"
+        f"• Состав: **{tones}**"
+    )
+
+
+def _chord_answer_text(start_note: str, chord_type: str) -> str:
+    """Возвращает подробный ответ для аккорда."""
+    if chord_type in ("D7", "D65", "D43", "D2", "II7", "VII7"):
+        notes = _seventh_chord_notes(start_note, chord_type)
+    else:
+        notes = _chord_notes_from_sound(start_note, chord_type)
+
+    # Интервальный состав текстом
+    if chord_type == "мажорное":
+        composition = "б.3 + м.3 (2 тона + 1,5 тона = 3,5 тона = 7 полутонов)"
+    elif chord_type == "минорное":
+        composition = "м.3 + б.3 (1,5 тона + 2 тона = 3,5 тона = 7 полутонов)"
+    elif chord_type == "увеличенное":
+        composition = "б.3 + б.3 (2 тона + 2 тона = 4 тона = 8 полутонов)"
+    elif chord_type == "уменьшённое":
+        composition = "м.3 + м.3 (1,5 тона + 1,5 тона = 3 тона = 6 полутонов)"
+    elif chord_type == "секстаккорд мажорный":
+        composition = "м.3 + ч.4 (1,5 тона + 2,5 тона = 4 тона = 8 полутонов)"
+    elif chord_type == "квартсекстаккорд мажорный":
+        composition = "ч.4 + б.3 (2,5 тона + 2 тона = 4,5 тона = 9 полутонов)"
+    elif chord_type == "секстаккорд минорный":
+        composition = "б.3 + ч.4 (2 тона + 2,5 тона = 4,5 тона = 9 полутонов)"
+    elif chord_type == "квартсекстаккорд минорный":
+        composition = "ч.4 + м.3 (2,5 тона + 1,5 тона = 4 тона = 8 полутонов)"
+    elif chord_type == "D7":
+        composition = "б.3 + м.3 + м.3 (2 + 1,5 + 1,5 = 5 тонов = 10 полутонов)"
+    elif chord_type == "D65":
+        composition = "м.3 + м.3 + б.2 (1,5 + 1,5 + 1 = 4 тона = 8 полутонов)"
+    elif chord_type == "D43":
+        composition = "м.3 + б.2 + б.3 (1,5 + 1 + 2 = 4,5 тона = 9 полутонов)"
+    elif chord_type == "D2":
+        composition = "б.2 + б.3 + м.3 (1 + 2 + 1,5 = 4,5 тона = 9 полутонов)"
+    elif chord_type == "II7":
+        composition = "м.3 + б.3 + м.3 (1,5 + 2 + 1,5 = 5 тонов = 10 полутонов)"
+    elif chord_type == "VII7":
+        composition = "м.3 + м.3 + м.3 (1,5 + 1,5 + 1,5 = 4,5 тона = 9 полутонов)"
+    else:
+        composition = "—"
+
+    return (
+        f"Аккорд: **{chord_type}** от ноты «{start_note}».\n\n"
+        f"• Ноты: **{' — '.join(notes)}**\n"
+        f"• Интервальный состав: **{composition}**"
+    )
+
+
 def gen_interval_from_sound() -> dict:
     note = random.choice(NOTES_RU)
     interval = random.choice(INTERVALS)
-    semitones = INTERVAL_SEMITONES[interval]
+    answer = _interval_answer_text(note, interval)
     return {
         "topic": "интервалы",
         "subtopic": "от звука",
         "question": f"Постройте {interval} вверх от ноты «{note}».",
-        "answer": (
-            f"{interval} от «{note}» вверх содержит {semitones} полутон(ов). "
-            f"Сыграйте его и проверьте себя на слух."
-        ),
+        "answer": answer,
         "hint": "Проверьте себя на инструменте.",
     }
 
@@ -363,7 +597,8 @@ def gen_interval_in_key() -> dict:
         "question": f"Постройте {interval} на {step} ступени тональности «{key}».",
         "answer": (
             f"Проверьте построение на инструменте. "
-            f"Помните о ключевых знаках тональности «{key}»."
+            f"Помните о ключевых знаках тональности «{key}».\n\n"
+            f"• Состав интервала: **{INTERVAL_TONES_TEXT[interval]}**"
         ),
         "hint": "Сначала определите все ноты тональности.",
     }
@@ -373,40 +608,32 @@ def gen_chord_from_sound(level: str) -> dict:
     note = random.choice(NOTES_RU)
     if level == "Новичок":
         chord = random.choice(TRIADS_BEGINNER)
+        answer = _chord_answer_text(note, chord)
         return {
             "topic": "аккорды",
             "subtopic": "трезвучие от звука",
             "question": f"Постройте {chord} трезвучие от ноты «{note}».",
-            "answer": (
-                f"{chord} трезвучие строится по терциям. "
-                f"мажор = б.3+м.3; минор = м.3+б.3; "
-                f"увеличенное = б.3+б.3; уменьшённое = м.3+м.3."
-            ),
+            "answer": answer,
             "hint": "Считайте терциями.",
         }
     elif level == "Средний":
         chord = random.choice(TRIAD_INVERSIONS)
+        answer = _chord_answer_text(note, chord)
         return {
             "topic": "аккорды",
             "subtopic": "обращение трезвучия",
             "question": f"Постройте {chord} от ноты «{note}».",
-            "answer": (
-                f"{chord} — обращение трезвучия. "
-                f"Секстаккорд = терция + кварта; квартсекстаккорд = кварта + терция."
-            ),
+            "answer": answer,
             "hint": "Помните интервальный состав.",
         }
     else:
         chord = random.choice(SEVENTH_CHORDS)
+        answer = _chord_answer_text(note, chord)
         return {
             "topic": "аккорды",
             "subtopic": "септаккорд",
             "question": f"Постройте {chord} от ноты «{note}».",
-            "answer": (
-                f"{chord} — септаккорд (или его обращение). "
-                f"D7 = б.3+м.3+м.3; D65 = м.3+м.3+б.2; "
-                f"D43 = м.3+б.2+б.3; D2 = б.2+б.3+м.3."
-            ),
+            "answer": answer,
             "hint": "Считайте интервалы последовательно.",
         }
 
@@ -445,6 +672,16 @@ def _is_flat_key(key: str) -> bool:
     return key in (flat_1 | flat_2 | flat_3 | flat_4 | flat_5)
 
 
+def _keys_text(count: int, order: list, sign_name: str) -> str:
+    """Скороговорка: сколько знаков — столько нот из порядка."""
+    notes = order[:count]
+    return (
+        f"Скороговорка: **{', '.join(order)}**.\n\n"
+        f"Отсчитываем {count} → **{', '.join(notes)}** — "
+        f"именно эти ноты {sign_name}."
+    )
+
+
 def gen_key_signs() -> dict:
     all_keys = BASIC_MAJOR_KEYS + BASIC_MINOR_KEYS
     key, signs = random.choice(all_keys)
@@ -454,7 +691,7 @@ def gen_key_signs() -> dict:
             "subtopic": "знаки при ключе",
             "question": f"Сколько бемолей при ключе в тональности «{key}»?",
             "answer": f"{signs} бемоль(ей)",
-            "hint": "Скороговорка: си, ми, ля, ре, соль, до, фа.",
+            "hint": _keys_text(signs, FLAT_ORDER, "понижаются (бемоли)"),
             "correct": str(signs),
         }
     return {
@@ -462,7 +699,7 @@ def gen_key_signs() -> dict:
         "subtopic": "знаки при ключе",
         "question": f"Сколько диезов при ключе в тональности «{key}»?",
         "answer": f"{signs} диез(ов)",
-        "hint": "Скороговорка: фа, до, соль, ре, ля, ми, си.",
+        "hint": _keys_text(signs, SHARP_ORDER, "повышаются (диезы)"),
         "correct": str(signs),
     }
 
@@ -491,6 +728,10 @@ def gen_parallel_key() -> dict:
 def gen_parallel_and_signs() -> dict:
     major, minor = random.choice(PARALLEL_KEYS)
     signs = _key_signs(major)
+    if _is_flat_key(major):
+        keys_hint = _keys_text(signs, FLAT_ORDER, "понижаются (бемоли)")
+    else:
+        keys_hint = _keys_text(signs, SHARP_ORDER, "повышаются (диезы)")
     return {
         "topic": "тональности",
         "subtopic": "знаки + параллельная",
@@ -500,11 +741,7 @@ def gen_parallel_and_signs() -> dict:
             f"2) какая параллельная тональность?"
         ),
         "answer": f"Знаков: {signs}. Параллельная: {minor}.",
-        "hint": (
-            "Скороговорки: фа-до-соль-ре-ля-ми-си (диезы); "
-            "си-ми-ля-ре-соль-до-фа (бемоли). "
-            "Параллельная — на м.3 вниз от мажора."
-        ),
+        "hint": keys_hint + " Параллельная — на м.3 вниз от мажора.",
         "correct": f"{signs}|{minor.lower()}",
     }
 
@@ -534,25 +771,27 @@ def gen_arpeggio(level: str) -> dict:
     note = random.choice(NOTES_RU)
     if level == "Умеющий":
         chord = random.choice(ARPEGGIO_TRIADS)
+        notes = _chord_notes_from_sound(note, chord)
         return {
             "topic": "арпеджио",
             "subtopic": "трезвучие",
             "question": f"Сыграйте арпеджио {chord} трезвучия от ноты «{note}».",
             "answer": (
-                f"Арпеджио {chord} трезвучия от «{note}»: "
-                f"играйте по звукам трезвучия вверх и вниз."
+                f"Арпеджио {chord} трезвучия от «{note}»:\n\n"
+                f"• Ноты: **{' — '.join(notes)}** (вверх и вниз)"
             ),
             "hint": "Сначала постройте трезвучие.",
         }
     else:
         chord = random.choice(ARPEGGIO_SEVENTH)
+        notes = _seventh_chord_notes(note, chord)
         return {
             "topic": "арпеджио",
             "subtopic": "септаккорд",
             "question": f"Сыграйте арпеджио {chord} от ноты «{note}».",
             "answer": (
-                f"Арпеджио {chord} от «{note}»: играйте по звукам септаккорда "
-                f"(или его обращения) вверх и вниз."
+                f"Арпеджио {chord} от «{note}»:\n\n"
+                f"• Ноты: **{' — '.join(notes)}** (вверх и вниз)"
             ),
             "hint": "Помните интервальный состав.",
         }
@@ -594,6 +833,8 @@ def generate_exercise(level: str) -> dict:
         return gen_arpeggio(level)
 
     return gen_interval_from_sound()
+
+                
 
 
 # =========================================================
@@ -731,6 +972,8 @@ def _next_exercise():
     st.session_state.show_answer = False
     st.session_state.text_answer_checked = False
     st.session_state.text_answer_correct = None
+    st.session_state.tonality_attempts = 0
+    st.session_state.tonality_failed = False
     st.rerun()
 
 
@@ -740,6 +983,10 @@ def render_exercise():
         st.session_state.current_exercise = generate_exercise(level)
 
     ex = st.session_state.current_exercise
+
+    # Инициализация счётчика попыток для тональностей
+    st.session_state.setdefault("tonality_attempts", 0)
+    st.session_state.setdefault("tonality_failed", False)
 
     st.subheader(f"Уровень: {level}")
     st.caption(f"Тема: **{ex['topic']}** — {ex.get('subtopic', '')}")
@@ -762,45 +1009,44 @@ def render_exercise():
                         user_norm = user_answer.strip().lower().replace(" ", "")
                         correct_norm = correct.replace(" ", "")
                         ok = user_norm == correct_norm
-                        st.session_state.text_answer_correct = ok
-                        st.session_state.text_answer_checked = True
                         if ok:
+                            st.session_state.text_answer_checked = True
+                            st.session_state.text_answer_correct = True
                             add_correct(st.session_state.username)
+                            st.rerun()
                         else:
-                            add_wrong(st.session_state.username, {
-                                "topic": ex["topic"],
-                                "question": ex["question"],
-                                "answer": ex["answer"],
-                            })
-                        st.rerun()
+                            st.session_state.tonality_attempts += 1
+                            if st.session_state.tonality_attempts >= 3:
+                                st.session_state.text_answer_checked = True
+                                st.session_state.text_answer_correct = False
+                                st.session_state.tonality_failed = True
+                                add_wrong(st.session_state.username, {
+                                    "topic": ex["topic"],
+                                    "question": ex["question"],
+                                    "answer": ex["answer"],
+                                })
+                            st.rerun()
             with c2:
-                if st.button("Показать ответ", use_container_width=True):
+                if st.button("Показать подсказку", use_container_width=True):
                     st.session_state.show_answer = True
                     st.rerun()
 
+            if st.session_state.tonality_attempts > 0 and not st.session_state.text_answer_checked:
+                left = 3 - st.session_state.tonality_attempts
+                st.warning(f"❌ Неправильно. Осталось попыток: **{left}**")
+
             if st.session_state.show_answer:
-                st.info(f"**Правильный ответ:** {ex['answer']}")
-                st.caption(f"💡 Подсказка: {ex.get('hint', '')}")
-                cc1, cc2 = st.columns(2)
-                with cc1:
-                    if st.button("✅ Я ответил правильно", use_container_width=True):
-                        add_correct(st.session_state.username)
-                        _next_exercise()
-                with cc2:
-                    if st.button("❌ Я ответил неправильно", use_container_width=True):
-                        add_wrong(st.session_state.username, {
-                            "topic": ex["topic"],
-                            "question": ex["question"],
-                            "answer": ex["answer"],
-                        })
-                        _next_exercise()
+                st.info(f"💡 Подсказка: {ex.get('hint', '')}")
         else:
             if st.session_state.text_answer_correct:
                 st.success("✅ Правильно!")
             else:
-                st.error("❌ Неправильно.")
+                st.error("❌ Попытки закончились.")
                 st.info(f"**Правильный ответ:** {ex['answer']}")
+                st.caption(f"💡 {ex.get('hint', '')}")
             if st.button("➡️ Следующее упражнение", use_container_width=True):
+                st.session_state.tonality_attempts = 0
+                st.session_state.tonality_failed = False
                 _next_exercise()
     else:
         if not st.session_state.show_answer:
@@ -808,7 +1054,7 @@ def render_exercise():
                 st.session_state.show_answer = True
                 st.rerun()
         else:
-            st.info(f"**Разбор:** {ex['answer']}")
+            st.info(ex["answer"])
             st.caption(f"💡 {ex.get('hint', '')}")
             cc1, cc2 = st.columns(2)
             with cc1:
@@ -832,7 +1078,6 @@ def render_exercise():
             "answer": ex["answer"],
         })
         st.success("Добавлено в избранное!")
-
 
 # =========================================================
 #  СТРАНИЦА: СТАТИСТИКА
